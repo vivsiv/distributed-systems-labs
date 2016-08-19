@@ -2,6 +2,8 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"os"
+	"encoding/json"
 )
 
 // doMap does the job of a map worker: it reads one of the input files
@@ -14,6 +16,65 @@ func doMap(
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(file string, contents string) []KeyValue,
 ) {
+
+	//Open the file and get its size
+	file, err := os.Open(inFile)
+	if err != nil {
+		debug("DoMap error: %s", err)
+		return
+	}
+	finfo, err := file.Stat()
+	if err != nil {
+		debug("DoMap error: %s", err)
+		return
+	}
+	fsize := finfo.Size()
+
+	//Convert the file contents to a string
+	buf := make([]byte, fsize)
+	_, err = file.Read(buf)
+	if err != nil {
+		debug("DoMap error: %s", err)
+	}
+	file_str := string(buf)
+
+	kv_arr := mapF(inFile, file_str)
+
+	//Make an array of nReduce out files to write to
+	outFiles := make([]*os.File, nReduce)
+	for i := 0; i < nReduce; i++ {
+		newFile, err := os.Create(reduceName(jobName, mapTaskNumber, i))
+		if err != nil {
+			debug("DoMap error: %s", err)
+			return
+		}
+		outFiles[i] = newFile
+	}
+
+	//Iterate through the key value pairs, 
+	//determine which out file they go to by a hash of their key
+	//encode the key value pair as a json in the outFile
+	for _, kv := range kv_arr {
+		idx := ihash(kv.Key) % uint32(len(outFiles))
+		enc := json.NewEncoder(outFiles[idx])
+		err := enc.Encode(&kv)
+		if (err != nil){
+			debug("DoMap error: %s", err)
+			return
+		}
+	}
+
+	//Close out the outFiles
+	for _, outFile := range outFiles {
+		err := outFile.Close()
+		if err != nil {
+			debug("DoMap error: %s", err)
+			return
+		}
+	}
+
+
+
 	// TODO:
 	// You will need to write this function.
 	// You can find the filename for this map task's input to reduce task number
