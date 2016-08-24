@@ -19,11 +19,12 @@ func (mr *Master) schedule(phase jobPhase) {
 
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, nios)
 
-
 	for taskNum := 0; taskNum < ntasks; taskNum++ {
-		go func(mr *Master, phase jobPhase, ntasks int, nios int) {
-			worker := <-mr.registerChannel
+		//Grab a free worker from the channel
+		freeWorker := <-mr.registerChannel
 
+		//Have the free worker do a task
+		go func(mr *Master, worker string, phase jobPhase, taskNum int, nios int) {
 			args := new(DoTaskArgs)
 			args.JobName = mr.jobName
 			args.File = mr.files[taskNum]
@@ -33,17 +34,14 @@ func (mr *Master) schedule(phase jobPhase) {
 
 			ok := call(worker, "Worker.DoTask", args, new(struct{}))
 			if !ok {
-				// handle worker failure
+				// TODO: handle worker failure
 				debug("Failure in %d task number %v", taskNum, phase)
 			}
-			mr.doneChannel <- true
-			mr.registerChannel <- worker
 
-		} (mr, phase, taskNum, nios)
-	}
+			//Re-register the worker as free
+			mr.registerChannel <-worker
 
-	for doneTaskNum := 0; doneTaskNum < ntasks; doneTaskNum++ {
-		<-mr.doneChannel
+		} (mr, freeWorker, phase, taskNum, nios)
 	}
 
 	// All ntasks tasks have to be scheduled on workers, and only once all of
