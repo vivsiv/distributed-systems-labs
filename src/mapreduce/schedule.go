@@ -35,9 +35,11 @@ func (mr *Master) schedule(phase jobPhase) {
 			args.NumOtherPhase = nios
 
 			ok := call(worker, "Worker.DoTask", args, new(struct{}))
-			if !ok {
-				// TODO: handle worker failure
+			for !ok {
 				debug("Failure in %d task number %v", taskNum, phase)
+				worker = <-mr.registerChannel
+				ok = call(worker, "Worker.DoTask", args, new(struct{}))
+				// TODO: handle worker failure
 			}
 
 			doneWorkers <-true
