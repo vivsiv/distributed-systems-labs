@@ -39,7 +39,6 @@ func (mr *Master) schedule(phase jobPhase) {
 				debug("Failure in %d task number %v", taskNum, phase)
 				worker = <-mr.registerChannel
 				ok = call(worker, "Worker.DoTask", args, new(struct{}))
-				// TODO: handle worker failure
 			}
 
 			doneWorkers <-true
@@ -53,13 +52,6 @@ func (mr *Master) schedule(phase jobPhase) {
 	for doneTaskNum := 0; doneTaskNum < ntasks; doneTaskNum++ {
 		<-doneWorkers
 	}
-
-	// All ntasks tasks have to be scheduled on workers, and only once all of
-	// them have been completed successfully should the function return.
-	// Remember that workers may fail, and that any given worker may finish
-	// multiple tasks.
-	//
-	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
-	//
+	
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
