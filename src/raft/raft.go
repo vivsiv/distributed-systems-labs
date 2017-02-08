@@ -49,10 +49,10 @@ func stateToString(st State) string {
 	}
 }
 
-const ELECTION_TIMEOUT_MIN = 200
-const ELECTION_TIMEOUT_MAX = 500
-const HEARTBEAT_TIMEOUT = 10
-const APPLY_STATE_TIMEOUT = 20
+const ELECTION_TIMEOUT_MIN = 150
+const ELECTION_TIMEOUT_MAX = 300
+const HEARTBEAT_TIMEOUT = 20
+const APPLY_STATE_TIMEOUT = 30
 const DEBUG = true
 
 //
@@ -77,7 +77,6 @@ type LogEntry struct {
 //
 type Raft struct {
 	mu          sync.Mutex
-	// mutex      chan bool
 	//THREAD-SAFE
 	peers       []*labrpc.ClientEnd //immutable
 	persister   *Persister
@@ -237,9 +236,6 @@ func (rf *Raft) broadcastRequestVote(){
 		}
 		rf.mu.Unlock()
 	}
-	
-
-
 }
 
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -278,11 +274,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	// if DEBUG { 
-	// 	fmt.Printf("<Peer:%d Term:%d State:%s>:Got HEARTBEAT from Leader:<Peer:%d Term:%d>\n", 
-	// 		rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term) 
-	// }
 
 	//Reply success=false if the leaders term is less than this peers term
 	if args.Term < rf.CurrentTerm {
@@ -658,7 +649,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.VotesFor = 0
 	rf.CommitIndex = -1
 	rf.lastApplied = -1
-	// rf.mutex = make(chan bool, 1)
 
 	// Your initialization code here.
 	//Run the main server thread
