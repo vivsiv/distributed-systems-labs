@@ -170,6 +170,14 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:RequestVote() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
+	lastLogIndex := len(rf.Logs) - 1
+	var lastLogTerm int
+	if lastLogIndex > -1 {
+		lastLogTerm = rf.Logs[lastLogIndex].Term 
+	} else {
+		lastLogTerm = 0
+	}	
+
 	//If the term for the requested vote is less than the current term 
 	if args.Term < rf.CurrentTerm {
 		if DEBUG { 
@@ -181,8 +189,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 	} else if args.Term == rf.CurrentTerm {
 	//If the terms are the same
-		//If this peer has already voted dont grant the vote
-		if rf.VotedFor > -1 {
+		//If this peer has already voted or the vote requester's log is behind this peer's log dont grant the vote
+		// A vote requester's log is behind if:
+		// 1) The lastLogTerm of the vote requester is less than the lastLogTerm of this peer
+		// 2) If the lastLogTerms are equal and the lastLogIndex of the vote requester is less than the LastLogIndex of this peer
+		if rf.VotedFor > -1 || args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
 			if DEBUG { 
 				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d>\n", 
 					rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
@@ -201,15 +212,28 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else {
 	//If the term for the requested vote is greater than the current term
-		if DEBUG { 
-			fmt.Printf("<Peer:%d Term:%d State:%s>:GRANTED RequestVote from:<Peer:%d Term:%d>\n", 
-				rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
-		}
 		//Update this peers term to the candidate's term
 		rf.CurrentTerm = args.Term
-		rf.VotedFor = args.CandidateId
 		reply.Term = rf.CurrentTerm
-		reply.VoteGranted = true
+
+		//If the vote requester's log is behind this peer's log dont grant the vote
+		// A vote requester's log is behind if:
+		// 1) The lastLogTerm of the vote requester is less than the lastLogTerm of this peer
+		// 2) If the lastLogTerms are equal and the lastLogIndex of the vote requester is less than the LastLogIndex of this peer		
+		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
+			if DEBUG { 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d>\n", 
+					rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
+			}
+			reply.VoteGranted = false
+		} else {
+			if DEBUG { 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:GRANTED RequestVote from:<Peer:%d Term:%d>\n", 
+					rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
+			}
+			rf.VotedFor = args.CandidateId
+			reply.VoteGranted = true
+		}
 		
 		//TODO: this isnt a true heartbeat, might want to just change the state here?
 		rf.followerCh <- true
@@ -239,8 +263,14 @@ func (rf *Raft) broadcastRequestVote(){
 			args.Term = rf.CurrentTerm
 			args.CandidateId = rf.me
 			//TODO
-			args.LastLogIndex = 0
-			args.LastLogTerm = rf.CurrentTerm
+			lastLogIndex := len(rf.Logs) - 1
+			args.LastLogIndex = lastLogIndex
+			if lastLogIndex < 0 {
+				args.LastLogTerm = 0
+			} else {
+				args.LastLogTerm = rf.Logs[lastLogIndex].Term
+			}
+			
 			
 			//Set up the sendRequestVote reply
 			reply := &RequestVoteReply{}
@@ -317,18 +347,18 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 		reply.Term = rf.CurrentTerm
 
-		lastLogIdx := len(rf.Logs) - 1
+		lastLogIndex := len(rf.Logs) - 1
 		var lastLogTerm int
-		if lastLogIdx > -1 {
-			lastLogTerm = rf.Logs[lastLogIdx].Term 
+		if lastLogIndex > -1 {
+			lastLogTerm = rf.Logs[lastLogIndex].Term 
 		} else {
 			lastLogTerm = 0
 		}	
 		//Check that the lastLog entry on this server is the same index and term as the lastLog on the leader
-		if args.PrevLogIndex == lastLogIdx && args.PrevLogTerm == lastLogTerm {
-			if (DEBUG) { 
-				fmt.Printf("<Peer:%d Term:%d State:%s>:Got HEARTBEAT from Leader:<Peer:%d, Term:%d> with MATCHING lastLogIdx (l:%d/f:%d) and lastTerm (l:%d/f:%d)\n", 
-					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIdx, args.PrevLogTerm, lastLogTerm) 
+		if args.PrevLogIndex == lastLogIndex && args.PrevLogTerm == lastLogTerm {
+			if (DEBUG && len(args.Entries) > 0) { 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:Got HEARTBEAT from Leader:<Peer:%d, Term:%d> with MATCHING lastLogIndex (l:%d/f:%d) and lastTerm (l:%d/f:%d)\n", 
+					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIndex, args.PrevLogTerm, lastLogTerm) 
 			}
 			//If the leader has more comitted entries than this raft then update this raft
 			if rf.CommitIndex < args.LeaderCommit {
@@ -344,8 +374,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			reply.Success = true
 		} else {
 			if (DEBUG) { 
-				fmt.Printf("<Peer:%d Term:%d State:%s>:Got a HEARTBEAT from Leader:<Peer:%d, Term:%d> with MISMATCHED lastLogIdx (l:%d/f:%d) or lastTerm (l:%d/f:%d)\n", 
-					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIdx, args.PrevLogTerm, lastLogTerm) 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:Got a HEARTBEAT from Leader:<Peer:%d, Term:%d> with MISMATCHED lastLogIndex (l:%d/f:%d) or lastTerm (l:%d/f:%d)\n", 
+					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIndex, args.PrevLogTerm, lastLogTerm) 
 			}
 			reply.Success = false
 		}
