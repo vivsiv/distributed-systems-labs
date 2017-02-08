@@ -54,6 +54,7 @@ const ELECTION_TIMEOUT_MAX = 300
 const HEARTBEAT_TIMEOUT = 20
 const APPLY_STATE_TIMEOUT = 30
 const DEBUG = true
+const LOCK_DEBUG = false
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -164,9 +165,11 @@ type RequestVoteReply struct {
 }
 
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	if (DEBUG && rf.state == CANDIDATE) { fmt.Printf("<Peer:%d Term:%d State:%s>:Trying to grab lock to move to process RequestVote\n", rf.me, rf.CurrentTerm, stateToString(rf.state))}
+	if (LOCK_DEBUG && rf.state != FOLLOWER) { fmt.Printf("<Peer:%d Term:%d State:%s>:Trying to grab lock to move to process RequestVote\n", rf.me, rf.CurrentTerm, stateToString(rf.state))}
+
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:RequestVote() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 	//If the term for the requested vote is less than the current term 
 	if args.Term < rf.CurrentTerm {
 		if DEBUG { 
@@ -214,13 +217,22 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		// rf.VotedFor = -1
 		// rf.VotesFor = 0
 	}
-	if (DEBUG && rf.state == CANDIDATE) { fmt.Printf("<Peer:%d Term:%d State:%s>:Exiting RequestVote, releasing Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state))}
+	rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:RequestVote() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 }
 
 func (rf *Raft) broadcastRequestVote(){
 	//Iterate through the peers and send a request vote to each
 	for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
 		rf.mu.Lock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:broadcastRequestVote() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+		// if rf.state == LEADER {
+		// 	rf.mu.Unlock()
+		// 	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:broadcastRequestVote() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+		// 	break
+		// }
+
 		if peerNum != rf.me {
 			//Set up the sendRequestVote args
 			args := &RequestVoteArgs{}
@@ -235,6 +247,8 @@ func (rf *Raft) broadcastRequestVote(){
 			go rf.sendRequestVote(peerNum, *args, reply)
 		}
 		rf.mu.Unlock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:broadcastRequestVote() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 	}
 }
 
@@ -242,16 +256,28 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if ok {
 		rf.mu.Lock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:sendRequestVote() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 		//If you got the vote and 
-		if reply.VoteGranted {
+		if rf.state == CANDIDATE && reply.VoteGranted {
 			rf.VotesFor += 1
 			//If are still a candidate and you have the majority of the votes in this election
-			if rf.state == CANDIDATE && (rf.VotesFor * 2) > len(rf.peers) {
+			if (rf.VotesFor * 2) > len(rf.peers) {
 				//Let the main thread know that you have enough votes to be leader
-				rf.leaderCh <- true
+				select {
+				case rf.leaderCh <- true:
+				default:
+					if DEBUG { 
+						fmt.Printf("<Peer:%d Term:%d State:%s>leaderCh is already full\n", 
+							rf.me, rf.CurrentTerm, stateToString(rf.state)) 
+					}		
+				}
+				
 			}
 		}
+
 		rf.mu.Unlock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:sendRequestVote() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 	}
 	return ok
 }
@@ -273,7 +299,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:AppendEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
 	//Reply success=false if the leaders term is less than this peers term
 	if args.Term < rf.CurrentTerm {
@@ -327,6 +353,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		//Send the heartbeat notice to the main server thread
 		rf.followerCh <- true
 	}
+	rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:AppendEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 }
 
 func (rf *Raft) sendHeartbeats(){
@@ -359,6 +387,8 @@ func (rf *Raft) broadcastAppendEntries(){
 	for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
 		if peerNum != rf.me {
 			rf.mu.Lock()
+			if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:broadcastAppendEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 			args := &AppendEntriesArgs{}
 			args.Term = rf.CurrentTerm
 			args.LeaderId = rf.me
@@ -379,7 +409,9 @@ func (rf *Raft) broadcastAppendEntries(){
 			args.LeaderCommit = rf.CommitIndex
 
 			reply := &AppendEntriesReply{}
+
 			rf.mu.Unlock()
+			if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:broadcastAppendEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
 			//Each heartbeat call should be its own thread
 			go rf.sendAppendEntries(peerNum, *args, reply)
@@ -391,6 +423,8 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.mu.Lock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:sendAppendEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 		if !reply.Success {
 			//If the leaders term is less than the term of the peer the leader needs to step down
 			if rf.CurrentTerm < reply.Term {
@@ -416,16 +450,23 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 			//Also update the next index array appropriately
 			rf.NextIndex[server] = reply.MatchIdx + 1
 		}
+
 		rf.mu.Unlock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:sendAppendEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 	}
 	return ok
 }
 
 func (rf *Raft) commitNewEntries(){
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:commitNewEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
-	if rf.state != LEADER || len(rf.Logs) == 0 { return }
+	if rf.state != LEADER || len(rf.Logs) == 0 {
+		rf.mu.Unlock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:commitNewEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) } 
+		return 
+	}
 	//Calculate how many uncomitted log entries the leader has
 	//countsLen := len(rf.Logs) - (rf.CommitIndex + 1)
 	countsLen := len(rf.Logs)
@@ -457,14 +498,21 @@ func (rf *Raft) commitNewEntries(){
 	if (DEBUG && oldCommit < rf.CommitIndex) { 
 		fmt.Printf("<Peer:%d Term:%d State:%s>:CommitIndex moving from %d to %d\n", 
 			rf.me, rf.CurrentTerm, stateToString(rf.state), oldCommit, rf.CommitIndex) 
-	}		
+	}
+
+	rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:commitNewEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 }
 
 func (rf *Raft) applyState(applyCh chan ApplyMsg){
 	for {
 		rf.commitNewEntries()
 		time.Sleep(time.Duration(APPLY_STATE_TIMEOUT) * time.Millisecond)
+
 		rf.mu.Lock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:applyState() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 		if rf.lastApplied < rf.CommitIndex {
 			for i := rf.lastApplied + 1; i <= rf.CommitIndex; i++ {
 				applyMsg := ApplyMsg{}
@@ -476,6 +524,8 @@ func (rf *Raft) applyState(applyCh chan ApplyMsg){
 			rf.lastApplied = rf.CommitIndex
 		}
 		rf.mu.Unlock()
+		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:applyState() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 	}
 }
 
@@ -495,7 +545,9 @@ func (rf *Raft) applyState(applyCh chan ApplyMsg){
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:Start() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+
 	var index int = 0
 	term := rf.CurrentTerm
 	isLeader := rf.state == LEADER
@@ -512,6 +564,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		//return the value it sits at in the LogEntries array is the index it will be committed at (1 indexed)
 		index = len(rf.Logs)
 	}
+
+	rf.mu.Unlock()
+	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:Start() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
 	return index, term, isLeader
 }
@@ -542,44 +597,55 @@ func (rf *Raft) run() {
 			//If this leader discovers it needs to stand down then move to the follower state
 			case <-rf.followerCh:
 				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:LEADER>:Standing down to FOLLOWER\n", rf.me, rf.CurrentTerm) }
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() LEADER <-rf.followerCh HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Standing down to FOLLOWER\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 				rf.state = FOLLOWER
 				rf.VotedFor = -1
 				rf.VotesFor = 0
+
 				rf.mu.Unlock()
-			//Otherwise send the heartbeat
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() LEADER <-rf.followerCh RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+			//Otherwise broadcast heartbeats
 			case <-heartbeatTimeout:
-				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:LEADER>: Sending HEARTBEATS\n", rf.me, rf.CurrentTerm) }
-				rf.mu.Unlock()
+				// rf.mu.Lock()
+				// if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() LEADER <-heartbeatTimeout HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				// if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>: Sending HEARTBEATS\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+				
+				// rf.mu.Unlock()
+				// if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() LEADER <-heartbeatTimeout RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 				rf.broadcastAppendEntries()
-				//rf.sendHeartbeats()
 			}
 		case FOLLOWER:
-			// if DEBUG { fmt.Printf("Peer %d is a FOLLOWER\n", rf.me) }
 			electionTimeoutVal := randTimeoutVal(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
 			electionTimeout := time.After(time.Duration(electionTimeoutVal) * time.Millisecond)
 			select {
 			//If you get a heartbeat as a follower do nothing
 			case <-rf.followerCh:
-				// rf.mu.Lock()
-				// if DEBUG { fmt.Printf("<Peer:%d Term:%d State:FOLLOWER>:Got a HEARTBEAT\n", rf.me, rf.CurrentTerm) }
-				// rf.mu.Unlock()
 			//If you timeout then transition to the candidate phase
 			case <-electionTimeout:
 				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:FOLLOWER>:Timeout moving to CANDIDATE\n", rf.me, rf.CurrentTerm) }
+				if LOCK_DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:run() FOLLOWER <-electionTimeout HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Timeout moving to CANDIDATE\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 				rf.state = CANDIDATE
+
 				rf.mu.Unlock()
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() FOLLOWER <-electionTimeout RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 			}
 		case CANDIDATE:
-			// if DEBUG { fmt.Printf("Peer %d is a CANDIDATE\n", rf.me) }
 			//Increment term and vote for yourself
 			rf.mu.Lock()
+			if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 			rf.CurrentTerm += 1
 			rf.VotedFor = rf.me
 			rf.VotesFor += 1
+
 			rf.mu.Unlock()
+			if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 			//Start the election
 			electionTimeoutVal := randTimeoutVal(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
 			electionTimeout := time.After(time.Duration(electionTimeoutVal) * time.Millisecond)
@@ -589,16 +655,23 @@ func (rf *Raft) run() {
 			//If you get a valid heartbeat from a leader then revert to follower
 			case <-rf.followerCh:
 				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:CANDIDATE>:Got HEARTBEAT moving to FOLLOWER\n", rf.me, rf.CurrentTerm) }
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-rf.followerCh HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Got HEARTBEAT moving to FOLLOWER\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 				rf.state = FOLLOWER
 				rf.VotedFor = -1
 				rf.VotesFor = 0
+
 				rf.mu.Unlock()
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-rf.followerCh RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 			//If you get enough votes to become the leader then transition to the leader state
 			case <-rf.leaderCh:
-				if (DEBUG) { fmt.Printf("<Peer:%d Term:%d State:CANDIDATE>:Trying to grab lock to move to LEADER\n", rf.me, rf.CurrentTerm)}
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:Trying to grab lock to move to LEADER\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
 				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:CANDIDATE>:Got enough votes moving to LEADER\n", rf.me, rf.CurrentTerm) }
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-rf.leaderCh HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Got enough votes moving to LEADER\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 				rf.state = LEADER
 				rf.VotedFor = -1
 				rf.VotesFor = 0
@@ -606,15 +679,20 @@ func (rf *Raft) run() {
 				for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
 					rf.NextIndex[peerNum] = len(rf.Logs)
 				}
+
 				rf.mu.Unlock()
-				if (DEBUG) { fmt.Printf("<Peer:%d Term:%d State:CANDIDATE>:Now leader, releasing Lock\n", rf.me, rf.CurrentTerm)}
-			//If you timeout without winning or losing remain a candidate and start the election over
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-rf.leaderCh RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+			//If you timeout without winning or losing remain a %d and start the election over
 			case <-electionTimeout:
 				rf.mu.Lock()
-				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:CANDIDATE>:Election timeout, starting new election (Term:%d)\n", rf.me, rf.CurrentTerm, rf.CurrentTerm + 1) }
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-electionTimeout HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
+
+				if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Election timeout, starting new election (Term:%d)\n", rf.me, rf.CurrentTerm, stateToString(rf.state), rf.CurrentTerm + 1) }
 				rf.VotedFor = -1
 				rf.VotesFor = 0
+
 				rf.mu.Unlock()
+				if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:run() CANDIDATE <-electionTimeout RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 			}
 		}
 	}
