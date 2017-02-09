@@ -181,7 +181,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	//If the term for the requested vote is less than the current term 
 	if args.Term < rf.CurrentTerm {
 		if DEBUG { 
-			fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d>\n", 
+			fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d> (Term is behind)\n", 
 				rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
 		}
 		//Dont grant the vote
@@ -195,7 +195,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		// 2) If the lastLogTerms are equal and the lastLogIndex of the vote requester is less than the LastLogIndex of this peer
 		if rf.VotedFor > -1 || args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
 			if DEBUG { 
-				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d>\n", 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d> (Already Voted in this term or their logs are behind)\n", 
 					rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
 			}
 			reply.Term = rf.CurrentTerm
@@ -212,17 +212,13 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else {
 	//If the term for the requested vote is greater than the current term
-		//Update this peers term to the candidate's term
-		rf.CurrentTerm = args.Term
-		reply.Term = rf.CurrentTerm
-
 		//If the vote requester's log is behind this peer's log dont grant the vote
 		// A vote requester's log is behind if:
 		// 1) The lastLogTerm of the vote requester is less than the lastLogTerm of this peer
 		// 2) If the lastLogTerms are equal and the lastLogIndex of the vote requester is less than the LastLogIndex of this peer		
 		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
 			if DEBUG { 
-				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d>\n", 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:DENIED RequestVote from:<Peer:%d Term:%d> (Their logs are behind)\n", 
 					rf.me, rf.CurrentTerm, stateToString(rf.state), args.CandidateId, args.Term) 
 			}
 			reply.VoteGranted = false
@@ -234,7 +230,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			rf.VotedFor = args.CandidateId
 			reply.VoteGranted = true
 		}
-		
+
+		//Update this peers term to the candidate's term
+		rf.CurrentTerm = args.Term
+		reply.Term = rf.CurrentTerm
 		//TODO: this isnt a true heartbeat, might want to just change the state here?
 		rf.followerCh <- true
 		// rf.state = FOLLOWER
@@ -324,7 +323,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int //current term 
 	Success bool
-	MatchIdx int //index of the last LogEntry on this server (only relevant if you get successful return)
+	MatchIndex int //index of the last LogEntry on this server (only relevant if you get successful return)
 }
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -338,6 +337,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term) 
 		}
 		reply.Term = rf.CurrentTerm
+		reply.MatchIndex = len(rf.Logs) - 1
 		reply.Success = false
 	} else {
 	//Otherwise reply success=true
@@ -370,12 +370,32 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.Logs = append(rf.Logs, args.Entries[i]) 
 			}
 
-			reply.MatchIdx = len(rf.Logs) - 1
+			reply.MatchIndex = len(rf.Logs) - 1
 			reply.Success = true
 		} else {
 			if (DEBUG) { 
 				fmt.Printf("<Peer:%d Term:%d State:%s>:Got a HEARTBEAT from Leader:<Peer:%d, Term:%d> with MISMATCHED lastLogIndex (l:%d/f:%d) or lastTerm (l:%d/f:%d)\n", 
 					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIndex, args.PrevLogTerm, lastLogTerm) 
+			}
+			//TODO
+			//If the this peer's log has uncommitted entries that are ahead of the leader's log we need to delete them
+			if lastLogIndex > args.PrevLogIndex {
+				origLogLength := len(rf.Logs)
+				rf.Logs = rf.Logs[:(args.PrevLogIndex + 1)]
+
+				if (DEBUG) { 
+					fmt.Printf("<Peer:%d Term:%d State:%s>:Deleting %d entries from this peers log to match it (l:%d/f:%d) with Leader:<Peer:%d, Term:%d>\n", 
+						rf.me, rf.CurrentTerm, stateToString(rf.state), origLogLength - len(rf.Logs), args.PrevLogIndex, len(rf.Logs) - 1, args.LeaderId, args.Term) 
+				}
+				rf.Logs = rf.Logs[:(args.PrevLogIndex + 1)]
+				reply.MatchIndex = len(rf.Logs) - 1
+			} else {
+			//If this peer is behind the leader then just let the leader know
+				reply.MatchIndex = len(rf.Logs) - 1
+				if (DEBUG) { 
+					fmt.Printf("<Peer:%d Term:%d State:%s>:This peer is behind(lastLogIndex [l:%d/f:%d]) Leader:<Peer:%d, Term:%d>\n", 
+						rf.me, rf.CurrentTerm, stateToString(rf.state), args.PrevLogIndex, len(rf.Logs) - 1, args.PrevLogTerm, lastLogTerm) 
+				}
 			}
 			reply.Success = false
 		}
@@ -455,6 +475,15 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 		rf.mu.Lock()
 		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:sendAppendEntries() HAS the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 
+		if rf.state != LEADER {
+			if (DEBUG) { 
+				fmt.Printf("<Peer:%d Term:%d State:%s>:Isn't a leader anymore, not fielding heartbeat replies\n", 
+					rf.me, rf.CurrentTerm, stateToString(rf.state)) 
+			}
+			rf.mu.Unlock()
+			return ok
+		}
+
 		if !reply.Success {
 			//If the leaders term is less than the term of the peer the leader needs to step down
 			if rf.CurrentTerm < reply.Term {
@@ -466,19 +495,20 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 				rf.CurrentTerm = reply.Term
 				rf.followerCh <- true
 			} else {
-			//Otherwise we need to just step back one log entry and try again
+			//Otherwise we need to update the MatchIndex and NextIndex NextIndex according to the returned MatchIndex
 				if (DEBUG) { 
-					fmt.Printf("<Peer:%d Term:%d State:%s>:RPC to peer %d returned FALSE, decrementing NextIndex to %d\n", 
-						rf.me, rf.CurrentTerm, stateToString(rf.state), server, rf.NextIndex[server] - 1) 
+					fmt.Printf("<Peer:%d Term:%d State:%s>:AppendEntriesRPC to <Peer:%d> returned FALSE, changing MatchIndex to %d and NextIndex to %d\n", 
+						rf.me, rf.CurrentTerm, stateToString(rf.state), server, reply.MatchIndex, reply.MatchIndex + 1) 
 				}
-				rf.NextIndex[server] -= 1
-				if rf.NextIndex[server] < 0 { rf.NextIndex[server] = 0 }
+				rf.matchIndex[server] = reply.MatchIndex
+				rf.NextIndex[server] = reply.MatchIndex + 1
+				// if rf.NextIndex[server] < 0 { rf.NextIndex[server] = 0 }
 			}	
 		} else {
 			//If the call was successful then update the leaders matchIndex array
-			rf.matchIndex[server] = int(math.Max(float64(reply.MatchIdx), float64(rf.matchIndex[server])))
+			rf.matchIndex[server] = int(math.Max(float64(reply.MatchIndex), float64(rf.matchIndex[server])))
 			//Also update the next index array appropriately
-			rf.NextIndex[server] = reply.MatchIdx + 1
+			rf.NextIndex[server] = reply.MatchIndex + 1
 		}
 
 		rf.mu.Unlock()
@@ -497,6 +527,8 @@ func (rf *Raft) commitNewEntries(){
 		if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:commitNewEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) } 
 		return 
 	}
+
+	// if DEBUG { fmt.Printf("<Peer:%d Term:%d State:%s>:Is trying to commit new entries\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
 	//Calculate how many uncomitted log entries the leader has
 	//countsLen := len(rf.Logs) - (rf.CommitIndex + 1)
 	countsLen := len(rf.Logs)
@@ -507,8 +539,10 @@ func (rf *Raft) commitNewEntries(){
 	for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
 		//If this peer has a later log on it than the last commit
 		if peerNum != rf.me && rf.matchIndex[peerNum] > rf.CommitIndex {
-			//increment that log entrys slot in the counts array accordingly
-			counts[rf.matchIndex[peerNum]] += 1
+			for countIdx := rf.CommitIndex + 1; countIdx < rf.matchIndex[peerNum] + 1; countIdx++ {
+				counts[countIdx] += 1
+			}
+			//counts[rf.matchIndex[peerNum]] += 1
 		}
 	}
 	oldCommit := rf.CommitIndex
