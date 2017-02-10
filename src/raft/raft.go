@@ -378,7 +378,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 					rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogIndex, lastLogIndex, args.PrevLogTerm, lastLogTerm) 
 			}
 			//TODO
-			//If the this peer's log has uncommitted entries that are ahead of the leader's log we need to delete them
+			//If the this peer's log has more entries than the leader's log we need to delete them
 			if lastLogIndex > args.PrevLogIndex {
 				origLogLength := len(rf.Logs)
 				rf.Logs = rf.Logs[:(args.PrevLogIndex + 1)]
@@ -387,14 +387,21 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 					fmt.Printf("<Peer:%d Term:%d State:%s>:Deleting %d entries from this peers log to match it (l:%d/f:%d) with Leader:<Peer:%d, Term:%d>\n", 
 						rf.me, rf.CurrentTerm, stateToString(rf.state), origLogLength - len(rf.Logs), args.PrevLogIndex, len(rf.Logs) - 1, args.LeaderId, args.Term) 
 				}
-				rf.Logs = rf.Logs[:(args.PrevLogIndex + 1)]
+
 				reply.MatchIndex = len(rf.Logs) - 1
+			} else if lastLogIndex == args.PrevLogIndex || lastLogTerm != args.PrevLogTerm {
+				if (DEBUG) { 
+					fmt.Printf("<Peer:%d Term:%d State:%s>:Log Lengths match Leader:<Peer:%d, Term:%d> but terms don't (l:%d/f:%d). Deleting 1 entry from this peer's log\n", 
+						rf.me, rf.CurrentTerm, stateToString(rf.state), args.LeaderId, args.Term, args.PrevLogTerm, lastLogTerm) 
+				}
+				rf.Logs = rf.Logs[:lastLogIndex]
+				reply.MatchIndex = lastLogIndex - 1
 			} else {
 			//If this peer is behind the leader then just let the leader know
 				reply.MatchIndex = len(rf.Logs) - 1
 				if (DEBUG) { 
-					fmt.Printf("<Peer:%d Term:%d State:%s>:This peer is behind(lastLogIndex [l:%d/f:%d]) Leader:<Peer:%d, Term:%d>\n", 
-						rf.me, rf.CurrentTerm, stateToString(rf.state), args.PrevLogIndex, len(rf.Logs) - 1, args.PrevLogTerm, lastLogTerm) 
+					fmt.Printf("<Peer:%d Term:%d State:%s>:This peer is behind (l:%d/f:%d) Leader:<Peer:%d, Term:%d>\n", 
+						rf.me, rf.CurrentTerm, stateToString(rf.state), args.PrevLogIndex, len(rf.Logs) - 1, args.LeaderId, args.Term) 
 				}
 			}
 			reply.Success = false
