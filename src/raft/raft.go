@@ -24,10 +24,9 @@ import (
 	"time"
 	"fmt"
 	"math"
+	"bytes"
+	"encoding/gob"
 )
-
-// import "bytes"
-// import "encoding/gob"
 
 type State int
 const (
@@ -112,14 +111,13 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here.
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -128,10 +126,11 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here.
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.CurrentTerm)
+	d.Decode(&rf.VotedFor)
+	d.Decode(&rf.Logs)
 }
 
 
@@ -370,6 +369,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.Logs = append(rf.Logs, args.Entries[i]) 
 			}
 
+			go rf.persist()
+
 			reply.MatchIndex = len(rf.Logs) - 1
 			reply.Success = true
 		} else {
@@ -570,6 +571,8 @@ func (rf *Raft) commitNewEntries(){
 		fmt.Printf("<Peer:%d Term:%d State:%s>:CommitIndex moving from %d to %d\n", 
 			rf.me, rf.CurrentTerm, stateToString(rf.state), oldCommit, rf.CommitIndex) 
 	}
+
+	go rf.persist()
 
 	rf.mu.Unlock()
 	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("<Peer:%d Term:%d State:%s>:commitNewEntries() RELEASES the Lock\n", rf.me, rf.CurrentTerm, stateToString(rf.state)) }
@@ -799,7 +802,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CommitIndex = -1
 	rf.lastApplied = -1
 
-	// Your initialization code here.
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	//Run the main server thread
 	fmt.Printf("Started up Peer:%d on Term:%d\n", rf.me, rf.CurrentTerm)
 	go rf.run()
@@ -807,8 +812,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applyState(applyCh)
 
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	
 
 	return rf
 }
