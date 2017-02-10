@@ -50,8 +50,8 @@ func stateToString(st State) string {
 
 const ELECTION_TIMEOUT_MIN = 150
 const ELECTION_TIMEOUT_MAX = 300
-const HEARTBEAT_TIMEOUT = 20
-const APPLY_STATE_TIMEOUT = 30
+const HEARTBEAT_TIMEOUT = 40
+const APPLY_STATE_TIMEOUT = 50
 const DEBUG = true
 const LOCK_DEBUG = false
 
