@@ -366,10 +366,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.logDebug(fmt.Sprintf("lastLogIndex:(L:%d/P:%d) is ahead of:<Leader:%d Term:%d>... DELETING %d entries from this Peer's log", 
 					args.PrevLogIndex, lastLogIndex, args.LeaderId, args.Term, origLogLength - len(rf.Logs)))
 
-			} else if lastLogIndex == args.PrevLogIndex || lastLogTerm != args.PrevLogTerm {
+			} else if lastLogIndex == args.PrevLogIndex && lastLogTerm != args.PrevLogTerm {
 			// If the lastLogIndexes are the same length but this Peer's lastLogTerm is not equal to the Leader's lastLogTerm
-				rf.logDebug(fmt.Sprintf("lastLogIndexes match:<Leader:%d Term:%d> but lastTerms don't:(L:%d/P:%d). DELETING 1 entry from this Peer's log", 
-					args.LeaderId, args.Term, args.PrevLogTerm, lastLogTerm))
+				rf.logDebug(fmt.Sprintf("lastLogIndexes match:(L:%d/P:%d) but lastTerms don't:(L:%d/P:%d). DELETING 1 entry from this Peer's log", 
+					args.PrevLogIndex, lastLogIndex, args.PrevLogTerm, lastLogTerm))
 
 				rf.Logs = rf.Logs[:lastLogIndex]
 				reply.MatchIndex = lastLogIndex - 1
