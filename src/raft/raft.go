@@ -29,62 +29,20 @@ import (
 	"strings"
 )
 
+//Various constants
+const ELECTION_TIMEOUT_MIN = 150
+const ELECTION_TIMEOUT_MAX = 300
+const HEARTBEAT_TIMEOUT = 40
+const APPLY_STATE_TIMEOUT = 50
+// const DEBUG = true
+// const LOCK_DEBUG = false
+
 type State int
 const (
 	LEADER State = iota
 	FOLLOWER
 	CANDIDATE
 )
-
-func (rf *Raft) stateToString() string {
-	switch rf.state {
-	case LEADER: 
-		return "Leader"
-	case FOLLOWER: 
-		return "Follower"
-	case CANDIDATE: 
-		return "Candidate"
-	default:
-		return ""
-	}
-}
-
-func (rf *Raft) toString() string {
-	return fmt.Sprintf("<Peer:%d Term:%d State:%s>", rf.me, rf.CurrentTerm, rf.stateToString())
-}
-
-func (rf *Raft) getMutex(methodName string) {
-	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("%s:%s HAS the Lock\n", rf.toString(), methodName) }
-	rf.mu.Lock()
-}
-
-func (rf *Raft) releaseMutex(methodName string) {
-	rf.mu.Unlock()
-	if LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("%s:%s RELEASES the Lock\n", rf.toString(), methodName) }
-}
-
-func logDebug(msg string) {
-	if DEBUG { fmt.Printf(msg) }
-}
-
-const ELECTION_TIMEOUT_MIN = 150
-const ELECTION_TIMEOUT_MAX = 300
-const HEARTBEAT_TIMEOUT = 40
-const APPLY_STATE_TIMEOUT = 50
-const DEBUG = true
-const LOCK_DEBUG = false
-
-//
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make().
-//
-type ApplyMsg struct {
-	Index       int
-	Command     interface{}
-	UseSnapshot bool   // ignore for lab2; only used in lab3
-	Snapshot    []byte // ignore for lab2; only used in lab3
-}
 
 type LogEntry struct {
 	Command interface{}
@@ -112,9 +70,42 @@ type Raft struct {
 	followerCh  chan bool
 	candidateCh chan bool
 	leaderCh    chan bool
+	DEBUG       bool //basic debug logging
+	LOCK_DEBUG  bool //lock debug logging
 	//Leaders only
     NextIndex     []int //for each server, index of next log entry to send to that server (indexed 0-N, initialized to 0)
 	matchIndex    []int //for each server, index of highest log entry known to be replicated on server
+}
+
+func (rf *Raft) stateToString() string {
+	switch rf.state {
+	case LEADER: 
+		return "Leader"
+	case FOLLOWER: 
+		return "Follower"
+	case CANDIDATE: 
+		return "Candidate"
+	default:
+		return ""
+	}
+}
+
+func (rf *Raft) toString() string {
+	return fmt.Sprintf("<Peer:%d Term:%d State:%s>", rf.me, rf.CurrentTerm, rf.stateToString())
+}
+
+func (rf *Raft) getMutex(methodName string) {
+	if rf.LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("%s:%s HAS the Lock\n", rf.toString(), methodName) }
+	rf.mu.Lock()
+}
+
+func (rf *Raft) releaseMutex(methodName string) {
+	rf.mu.Unlock()
+	if rf.LOCK_DEBUG && rf.state != FOLLOWER { fmt.Printf("%s:%s RELEASES the Lock\n", rf.toString(), methodName) }
+}
+
+func (rf *Raft) logDebug(msg string) {
+	if rf.DEBUG { fmt.Printf("%s:%s\n", rf.toString(), msg) }
 }
 
 // return currentTerm and whether this server
@@ -195,8 +186,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	// If the requester's term is less than this peer's term: VoteGranted=false
 	if args.Term < rf.CurrentTerm {
-		logDebug(fmt.Sprintf("%s:DENIED RequestVote from Requester:<Peer:%d Term:%d> (Requester Behind This Peer's Term)\n", 
-				rf.toString(), args.CandidateId, args.Term))
+		rf.logDebug(fmt.Sprintf("DENIED RequestVote from Requester:<Peer:%d Term:%d> (Requester Behind This Peer's Term)", 
+			args.CandidateId, args.Term))
 
 		reply.VoteGranted = false
 		reply.Term = rf.CurrentTerm
@@ -207,15 +198,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		//   1) The lastLogTerm of the requester is less than the lastLogTerm of this peer
 		//   2) The lastLogTerms are equal and the lastLogIndex of the requester is less than the LastLogIndex of this peer
 		if rf.VotedFor > -1 || args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
-			logDebug(fmt.Sprintf("%s:DENIED RequestVote from Requester:<Peer:%d Term:%d> (This Peer Already Voted OR Requester's Logs Are Behind)\n", 
-				rf.toString(), args.CandidateId, args.Term))
+			rf.logDebug(fmt.Sprintf("DENIED RequestVote from Requester:<Peer:%d Term:%d> (This Peer Already Voted OR Requester's Logs Are Behind)", 
+				args.CandidateId, args.Term))
 
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = false 
 		} else {
 		// If the Requester's log is not behind this Peer's log VoteGranted=true
-			logDebug(fmt.Sprintf("%s:GRANTED RequestVote from Requester:<Peer:%d Term:%d>\n", 
-					rf.toString(), args.CandidateId, args.Term))
+			rf.logDebug(fmt.Sprintf("GRANTED RequestVote from Requester:<Peer:%d Term:%d>", 
+				args.CandidateId, args.Term))
 
 			rf.VotedFor = args.CandidateId
 			reply.Term = rf.CurrentTerm
@@ -228,14 +219,14 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		//   1) The lastLogTerm of the requester is less than the lastLogTerm of this peer
 		//   2) The lastLogTerms are equal and the lastLogIndex of the requester is less than the LastLogIndex of this peer		
 		if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
-			logDebug(fmt.Sprintf("%s:DENIED RequestVote from Requester:<Peer:%d Term:%d> (Requesters Logs Are Behind)\n", 
-					rf.toString(), args.CandidateId, args.Term))
+			rf.logDebug(fmt.Sprintf("DENIED RequestVote from Requester:<Peer:%d Term:%d> (Requesters Logs Are Behind)", 
+				args.CandidateId, args.Term))
 
 			reply.VoteGranted = false
 		} else {
 		// If the Requester's logs are not behind this Peer's logs VoteGranted=true
-			logDebug(fmt.Sprintf("%s:GRANTED RequestVote from Requester:<Peer:%d Term:%d>\n", 
-					rf.toString(), args.CandidateId, args.Term))
+			rf.logDebug(fmt.Sprintf("GRANTED RequestVote from Requester:<Peer:%d Term:%d>", 
+				args.CandidateId, args.Term))
 
 			rf.VotedFor = args.CandidateId
 			reply.VoteGranted = true
@@ -249,7 +240,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 // Send requestVote RPC's to all peers
 func (rf *Raft) broadcastRequestVote(){
-	logDebug(fmt.Sprintf("%s:Sending RequestVote to Peers:%v\n", rf.toString(), rf.peerNums))
+	rf.logDebug(fmt.Sprintf("Sending RequestVote to Peers:%v", 
+		rf.peerNums))
 
 	for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
 		rf.getMutex("broadcastRequestVote()")
@@ -320,8 +312,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	// If the Leader's term is less than this Peer's term Success=false
 	if args.Term < rf.CurrentTerm {
-		logDebug(fmt.Sprintf("%s:Got AppendEntry for earlier term from:<Leader:%d Term:%d>\n", 
-				rf.toString(), args.LeaderId, args.Term))
+		rf.logDebug(fmt.Sprintf("Got AppendEntry for earlier term from:<Leader:%d Term:%d>", 
+			args.LeaderId, args.Term))
 
 		reply.Term = rf.CurrentTerm
 		reply.MatchIndex = len(rf.Logs) - 1
@@ -357,7 +349,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 			//Add all new log entries to this Peer
 			if len(args.Entries) > 0 {
-				logDebug(fmt.Sprintf("%s:Adding Log Entries[%d-]:%v\n", rf.toString(), lastLogIndex + 1, args.Entries))
+				rf.logDebug(fmt.Sprintf("Adding Log Entries[%d-]:%v", 
+					lastLogIndex + 1, args.Entries))
 
 				rf.Logs = append(rf.Logs, args.Entries...)
 			}
@@ -375,20 +368,21 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.Logs = rf.Logs[:(args.PrevLogIndex + 1)]
 				reply.MatchIndex = len(rf.Logs) - 1
 
-				logDebug(fmt.Sprintf("%s:lastLogIndex:(L:%d/P:%d) is ahead of:<Leader:%d, Term:%d>... DELETING %d entries from this Peer's log\n", 
-					rf.toString(), args.PrevLogIndex, lastLogIndex, args.LeaderId, args.Term, origLogLength - len(rf.Logs)))
+				rf.logDebug(fmt.Sprintf("lastLogIndex:(L:%d/P:%d) is ahead of:<Leader:%d, Term:%d>... DELETING %d entries from this Peer's log", 
+					args.PrevLogIndex, lastLogIndex, args.LeaderId, args.Term, origLogLength - len(rf.Logs)))
+
 			} else if lastLogIndex == args.PrevLogIndex || lastLogTerm != args.PrevLogTerm {
 			// If the lastLogIndexes are the same length but this Peer's lastLogTerm is not equal to the Leader's lastLogTerm
-				logDebug(fmt.Sprintf("%s:lastLogIndexes match:<Leader:%d, Term:%d> but lastTerms don't:(L:%d/P:%d). DELETING 1 entry from this Peer's log\n", 
-						rf.toString(), args.LeaderId, args.Term, args.PrevLogTerm, lastLogTerm))
+				rf.logDebug(fmt.Sprintf("lastLogIndexes match:<Leader:%d, Term:%d> but lastTerms don't:(L:%d/P:%d). DELETING 1 entry from this Peer's log", 
+					args.LeaderId, args.Term, args.PrevLogTerm, lastLogTerm))
 
 				rf.Logs = rf.Logs[:lastLogIndex]
 				reply.MatchIndex = lastLogIndex - 1
 			} else {
 			// If this Peer's lastLogIndex is behind the Leader, then just let the Leader know
 				reply.MatchIndex = len(rf.Logs) - 1
-				logDebug(fmt.Sprintf("%s:lastLogIndex:(Leader:%d/Peer:%d) is behind:<Leader:%d, Term:%d>\n", 
-						rf.toString(), args.PrevLogIndex, len(rf.Logs) - 1, args.LeaderId, args.Term))
+				rf.logDebug(fmt.Sprintf("lastLogIndex:(Leader:%d/Peer:%d) is behind:<Leader:%d, Term:%d>", 
+					args.PrevLogIndex, len(rf.Logs) - 1, args.LeaderId, args.Term))
 			}
 			reply.Success = false
 		}
@@ -435,8 +429,8 @@ func (rf *Raft) broadcastAppendEntries(){
 	}
 
 	if (len(msgs) > 0){
-		logDebug(fmt.Sprintf("%s:Broadcasting new Log Entries to:%v\n", 
-			rf.toString(), strings.Join(msgs, ", ")))
+		rf.logDebug(fmt.Sprintf("Broadcasting new Log Entries to:%v", 
+			strings.Join(msgs, ", ")))
 	}
 }
 
@@ -447,24 +441,22 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 		defer rf.releaseMutex("sendAppendEntries()")
 
 		if rf.state != LEADER {
-			logDebug(fmt.Sprintf("%s:Not a leader, no longer accepting AppendEntry replies\n", 
-					rf.toString()))
-
+			rf.logDebug(fmt.Sprintf("Not a leader, no longer accepting AppendEntry replies"))
 			return ok
 		}
 
 		if !reply.Success {
 			// If this Leader's term is less than the Peer's term, update its term and stand down to follower
 			if rf.CurrentTerm < reply.Term {
-				logDebug(fmt.Sprintf("%s:Found out it's behind (Term:%d)\n", 
-						rf.toString(), reply.Term))
+				rf.logDebug(fmt.Sprintf("Found out it's behind (Term:%d)", 
+					reply.Term))
 
 				rf.CurrentTerm = reply.Term
 				rf.followerCh <- true
 			} else {
 			// Otherwise we need to update this Leader's MatchIndex and NextIndex arrays according to the MatchIndex returned by the Peer
-				logDebug(fmt.Sprintf("%s:AppendEntry to <Peer:%d> was Not sucessful, changing MatchIndex[%d] to %d and NextIndex[%d] to %d\n", 
-					rf.toString(), server, server, reply.MatchIndex, server, reply.MatchIndex + 1)) 
+				rf.logDebug(fmt.Sprintf("AppendEntry to <Peer:%d> was Not sucessful, changing MatchIndex[%d] to %d and NextIndex[%d] to %d", 
+					server, server, reply.MatchIndex, server, reply.MatchIndex + 1)) 
 
 				rf.matchIndex[server] = reply.MatchIndex
 				rf.NextIndex[server] = reply.MatchIndex + 1
@@ -502,8 +494,8 @@ func (rf *Raft) commitNewEntries(){
 	//If a majority of servers have a certain new LogEntry, commit it. Keep going until a new log entry is not on a majority of servers
 	for i := (rf.CommitIndex + 1); i < countsLen; i++ {
 		if ((counts[i] + 1) * 2) > len(rf.peers) {
-			logDebug(fmt.Sprintf("%s:Log[%d]=%v is replicated on %d/%d machines... committing\n", 
-					rf.toString(), i, rf.Logs[i], counts[i] + 1, len(rf.peers)))
+			rf.logDebug(fmt.Sprintf("Log[%d]=%v is replicated on %d/%d machines... committing", 
+				i, rf.Logs[i], counts[i] + 1, len(rf.peers)))
 
 			rf.CommitIndex = i
 		} else {
@@ -511,12 +503,24 @@ func (rf *Raft) commitNewEntries(){
 		}
 	}
 	if oldCommit < rf.CommitIndex { 
-		logDebug(fmt.Sprintf("%s:Committed %d new entries:%v ... CommitIndex moving from %d to %d\n", 
-			rf.toString(), rf.CommitIndex - oldCommit, rf.Logs[(oldCommit + 1):(rf.CommitIndex + 1)], oldCommit, rf.CommitIndex)) 
-		logDebug(fmt.Sprintf("%s:New Commit Log:%v\n", rf.toString(), rf.Logs[:rf.CommitIndex + 1]))
+		rf.logDebug(fmt.Sprintf("Committed %d new entries:%v ... CommitIndex moving from %d to %d", 
+			rf.CommitIndex - oldCommit, rf.Logs[(oldCommit + 1):(rf.CommitIndex + 1)], oldCommit, rf.CommitIndex)) 
+		rf.logDebug(fmt.Sprintf("New Commit Log:%v", rf.Logs[:rf.CommitIndex + 1]))
 	}
 
 	go rf.persist()
+}
+
+//
+// as each Raft peer becomes aware that successive log entries are
+// committed, the peer should send an ApplyMsg to the service (or
+// tester) on the same server, via the applyCh passed to Make().
+//
+type ApplyMsg struct {
+	Index       int
+	Command     interface{}
+	UseSnapshot bool   // ignore for lab2; only used in lab3
+	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
 func (rf *Raft) applyState(applyCh chan ApplyMsg){
@@ -564,8 +568,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.state == LEADER
 
 	if isLeader {
-		logDebug(fmt.Sprintf("%s:Received command %v from Client\n", 
-			rf.toString(), command)) 
+		rf.logDebug(fmt.Sprintf("Received command %v from Client", 
+			command)) 
 
 		newEntry := LogEntry{}
 		newEntry.Command = command
@@ -585,6 +589,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
+	rf.logDebug(fmt.Sprintf("Killed"))
+	rf.DEBUG = false
+	rf.LOCK_DEBUG = false
 	// Your code here, if desired.
 }
 
@@ -605,7 +612,7 @@ func (rf *Raft) run() {
 			case <-rf.followerCh:
 				rf.getMutex("run() LEADER <-rf.followerCh")
 
-				logDebug(fmt.Sprintf("%s:Standing down to Follower\n", rf.toString()))
+				rf.logDebug(fmt.Sprintf("Standing down to Follower"))
 
 				rf.state = FOLLOWER
 				rf.VotedFor = -1
@@ -626,7 +633,7 @@ func (rf *Raft) run() {
 			case <-electionTimeout:
 				rf.getMutex("run() FOLLOWER <-electionTimeout")
 
-				logDebug(fmt.Sprintf("%s:Timeout moving to Candidate\n", rf.toString()))
+				rf.logDebug(fmt.Sprintf("Timeout moving to Candidate"))
 				rf.state = CANDIDATE
 
 				rf.releaseMutex("run() FOLLOWER <-electionTimeout")
@@ -639,7 +646,7 @@ func (rf *Raft) run() {
 			rf.VotedFor = rf.me
 			rf.VotesFor += 1
 
-			logDebug(fmt.Sprintf("%s:Starting election for Term:%d\n", rf.toString(), rf.CurrentTerm))
+			rf.logDebug(fmt.Sprintf("Starting election for Term:%d", rf.CurrentTerm))
 
 			rf.releaseMutex("run() CANDIDATE")
 
@@ -663,7 +670,7 @@ func (rf *Raft) run() {
 			case <-rf.leaderCh:
 				rf.getMutex("run() CANDIDATE <-rf.leaderCh")
 
-				logDebug(fmt.Sprintf("%s:Got enough votes moving to Leader\n", rf.toString()))
+				rf.logDebug(fmt.Sprintf("Got enough votes moving to Leader"))
 
 				rf.state = LEADER
 				rf.VotedFor = -1
@@ -678,7 +685,7 @@ func (rf *Raft) run() {
 			case <-electionTimeout:
 				rf.getMutex("run() CANDIDATE <-electionTimeout")
 
-				logDebug(fmt.Sprintf("%s:Election timeout (Term:%d)\n", rf.toString(), rf.CurrentTerm))
+				rf.logDebug(fmt.Sprintf("Election timeout (Term:%d)", rf.CurrentTerm))
 
 				rf.VotedFor = -1
 				rf.VotesFor = 0
@@ -723,6 +730,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.VotesFor = 0
 	rf.CommitIndex = -1
 	rf.lastApplied = -1
+
+	rf.DEBUG = true
+	rf.LOCK_DEBUG = false
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
