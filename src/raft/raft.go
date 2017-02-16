@@ -468,36 +468,36 @@ func (rf *Raft) commitNewEntries(){
 
 	if rf.state != LEADER || len(rf.Logs) == 0 { return }
 
-	countsLen := len(rf.Logs)
-	// Array that holds the count of number of servers a LogEntry is replicated on
-	counts := make([]int, countsLen)
+	//Go through the leaders logs backwards until the current commit index
+	for logIndex := len(rf.Logs) - 1; logIndex > rf.CommitIndex; logIndex-- {
+		logEntry := rf.Logs[logIndex]
+		logTerm := logEntry.Term
 
-	// Iterate through the Leader's matchIndex array and see how many Peers have LogEntries > rf.CommitIndex
-	for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
-		if peerNum != rf.me && rf.matchIndex[peerNum] > rf.CommitIndex {
-			//Increment the counts array for entries > rf.CommitIndex and <= rf.matchIndex[peerNum]
-			for countIdx := rf.CommitIndex + 1; countIdx <= rf.matchIndex[peerNum]; countIdx++ {
-				counts[countIdx] += 1
+		//If we've reached a LogEntry that is of lower term we can just break out
+		if logTerm < rf.CurrentTerm { break }
+		//Replication count for this LogEntry starts at 1 (its on the leader)
+		replicationCount := 1
+		//Iterate through all peers
+		for peerNum := 0; peerNum < len(rf.peers); peerNum++ {
+			//If a peer has this Log replicated on it, increment the replication count
+			if peerNum != rf.me && rf.matchIndex[peerNum] >= logIndex {
+				replicationCount++
 			}
 		}
-	}
 
-	oldCommit := rf.CommitIndex
-	//If a majority of servers have a certain new LogEntry, commit it. Keep going until a new log entry is not on a majority of servers
-	for i := (rf.CommitIndex + 1); i < countsLen; i++ {
-		if ((counts[i] + 1) * 2) > len(rf.peers) {
-			rf.logDebug(fmt.Sprintf("Log[%d]=%v is replicated on %d/%d machines... committing", 
-				i, rf.Logs[i], counts[i] + 1, len(rf.peers)))
+		//If a logEntry is the same term as the leader and on a majority of machines commit it and all entries before it
+		if logTerm == rf.CurrentTerm && replicationCount * 2 > len(rf.peers) {
+			oldCommitIndex := rf.CommitIndex
+			rf.CommitIndex = logIndex
 
-			rf.CommitIndex = i
-		} else {
-			break;
+			rf.logDebug(fmt.Sprintf("Log[%d]=%v is replicated on %d/%d machines", 
+				logIndex, logEntry, replicationCount, len(rf.peers)))
+			rf.logDebug(fmt.Sprintf("Committed %d new entries:%v ... CommitIndex moving from %d to %d", 
+				rf.CommitIndex - oldCommitIndex, rf.Logs[(oldCommitIndex + 1):(rf.CommitIndex + 1)], oldCommitIndex, rf.CommitIndex)) 
+			rf.logDebug(fmt.Sprintf("New Commit Log:%v", rf.Logs[:rf.CommitIndex + 1]))
+			
+			break
 		}
-	}
-	if oldCommit < rf.CommitIndex { 
-		rf.logDebug(fmt.Sprintf("Committed %d new entries:%v ... CommitIndex moving from %d to %d", 
-			rf.CommitIndex - oldCommit, rf.Logs[(oldCommit + 1):(rf.CommitIndex + 1)], oldCommit, rf.CommitIndex)) 
-		rf.logDebug(fmt.Sprintf("New Commit Log:%v", rf.Logs[:rf.CommitIndex + 1]))
 	}
 
 	go rf.persist()
