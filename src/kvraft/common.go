@@ -8,41 +8,36 @@ package raftkv
 // }
 
 const (
-	OK       = "OK"
-	ErrNoKey = "ErrNoKey"
-	Timeout  = "Timeout"
-)
-
-type Err string
-
-type OpType string
-
-const (
 	Get = "Get"
 	Put = "Put"
 	Append = "Append"
+	OK    = "OK"
+	Error = "Error"
 )
 
-// Put or Append
+type OpType string
+
+type RpcStatus string
+
 type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Key    string
-	Value  string
-	Type    OpType // "Put" or "Append"
+	ClientId  int64
+	RequestId int
+	Type      OpType
+	Key       string
+	Value     string
 }
 
 type PutAppendReply struct {
-	WrongLeader bool
-	Err         Err
+	Status RpcStatus
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	ClientId  int64
+	RequestId int
+	Key       string
 }
 
 type GetReply struct {
-	WrongLeader bool
-	Err         Err
-	Value       string
+	Status RpcStatus
+	Value  string
 }

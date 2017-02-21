@@ -747,7 +747,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CommitIndex = -1
 	rf.lastApplied = -1
 
-	rf.DEBUG = true
+	rf.DEBUG = false
 	rf.LOCK_DEBUG = false
 
 	// initialize from state persisted before a crash

@@ -6,21 +6,22 @@ import (
 	//"log"
 	"raft"
 	"sync"
-	// "time"
+	"time"
 	"fmt"
 )
 
+const RPC_TIMEOUT = 3000
+
 type Op struct {
 	Type      OpType
+    ClientId  int64 
+    RequestId int //Per client for duplicate detection
 	Key       string
 	Value     string
-	//ClientId  int 
-	//RequestId int //Per client for duplicate detection
 }
 
-type PendingOp struct {
+type PendingRpc struct {
 	op        *Op
-	index     int
 	appliedCh chan bool
 }
 
@@ -31,8 +32,8 @@ type RaftKV struct {
 	applyCh      chan raft.ApplyMsg
 	maxraftstate int // snapshot if log grows this big
 	database     map[string]string
-	pendingOps   map[int]*PendingOp
-	lastApplied  map[int]int //tracks the last op applied by this server per client
+	pendingRpcs  map[int]*PendingRpc //Maps expectedIndex in this server's log to PendingRpc structs
+	lastApplied  map[int64]int //Maps ClientId to last applied RequestId per client
 	DEBUG        bool
 	LOCK_DEBUG   bool
 }
@@ -47,84 +48,108 @@ func (kv *RaftKV) logDebug(msg string) {
 
 func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 	newOp := Op{}
+	newOp.ClientId = args.ClientId
+	newOp.RequestId = args.RequestId
 	newOp.Type = Get
 	newOp.Key = args.Key
 
 	//Need to Persist Command to Raft
-	index, _, isLeader := kv.rf.Start(newOp)
+	expextedIndex, _, isLeader := kv.rf.Start(newOp)
 
 	//If this raft is not the leader just return
 	if !isLeader {
-		reply.WrongLeader = true 
+		reply.Status = Error
 		return 
 	}
 
 	kv.logDebug(fmt.Sprintf("Got Get RPC:%v, persisting to Raft...", newOp))
 
-	newPendingOp := &PendingOp{}
-	newPendingOp.op = &newOp
-	newPendingOp.index = index
-	newPendingOp.appliedCh = make(chan bool)
+	pendingRpc := &PendingRpc{}
+	pendingRpc.op = &newOp
+	pendingRpc.appliedCh = make(chan bool)
 
 	kv.mu.Lock()
-	kv.pendingOps[index] = newPendingOp
+	kv.pendingRpcs[expextedIndex] = pendingRpc
 	kv.mu.Unlock()
 
-
+	rpcTimeout := time.After(time.Duration(RPC_TIMEOUT) * time.Millisecond)
 	//Wait to see if the command gets applied to the raft
 	select {
 	//This Op gets applied to the raft
-	case <-newPendingOp.appliedCh:		
-		kv.logDebug(fmt.Sprintf("Notified %v Op was persisted to Raft, updating database...", newOp))
-		//Then we can query the database
-		kv.mu.Lock()
-		value, ok := kv.database[newOp.Key]
-		kv.mu.Unlock()
+	case applied := <-pendingRpc.appliedCh:	
+		if applied {
+			kv.logDebug(fmt.Sprintf("Notified %v Op was persisted to Raft, updating database...", newOp))
+			//Then we can query the database
+			kv.mu.Lock()
+			value := kv.database[newOp.Key]
+			kv.mu.Unlock()
 
-		if ok {
-			reply.Err = OK
+			reply.Status = OK
 			reply.Value = value
 		} else {
-			reply.Err = ErrNoKey
+			reply.Status = Error
+			//kv.logDebug(fmt.Sprintf("Notified %v Op failed to persist to Raft, reporting error...", newOp))
 		}
-	}
+	case <-rpcTimeout:
+		kv.logDebug(fmt.Sprintf("RPC for Op %v timed out", newOp))
 
+		kv.mu.Lock()
+		delete(kv.pendingRpcs, expextedIndex)
+		kv.mu.Unlock()
+
+		reply.Status = Error	
+	}
 	kv.logDebug(fmt.Sprintf("Returning Reply %v for Get RPC %v", *reply, newOp))
 }
 
 func (kv *RaftKV) PutAppend(args PutAppendArgs, reply *PutAppendReply) {
 	newOp := Op{}
+	newOp.ClientId = args.ClientId
+	newOp.RequestId = args.RequestId
 	newOp.Type = args.Type
 	newOp.Key = args.Key
 	newOp.Value = args.Value
 
 	//Need to Persist Command to Raft
-	index, _, isLeader := kv.rf.Start(newOp)
+	expextedIndex, _, isLeader := kv.rf.Start(newOp)
 
 	if !isLeader {
-		reply.WrongLeader = true
+		reply.Status = Error
 		return
 	}
 
-	newPendingOp := &PendingOp{}
-	newPendingOp.op = &newOp
-	newPendingOp.index = index
-	newPendingOp.appliedCh = make(chan bool)
+	pendingRpc := &PendingRpc{}
+	pendingRpc.op = &newOp
+	pendingRpc.appliedCh = make(chan bool)
 
 	kv.mu.Lock()
-	kv.pendingOps[index] = newPendingOp
+	kv.pendingRpcs[expextedIndex] = pendingRpc
 	kv.mu.Unlock()
 
 	kv.logDebug(fmt.Sprintf("Got Put/Append RPC:%v, persisting to Raft...", newOp))
 
+	rpcTimeout := time.After(time.Duration(RPC_TIMEOUT) * time.Millisecond)
 	select {
 	//This Op gets applied to the raft
-	case <-newPendingOp.appliedCh:
-		reply.WrongLeader = false
-		reply.Err = OK
+	case applied := <-pendingRpc.appliedCh:
+		if applied {
+			reply.Status = OK
+			//kv.logDebug(fmt.Sprintf("Notified %v Op was persisted to Raft, Returning Reply %v", newOp, *reply))
+		} else {
+			reply.Status = Error
+			//kv.logDebug(fmt.Sprintf("Notified %v Op was NOT persisted to Raft, Returning Reply %v", newOp, *reply))
+		}
+	case <-rpcTimeout:
+		kv.logDebug(fmt.Sprintf("RPC for Op %v timed out", newOp))
 
-		kv.logDebug(fmt.Sprintf("Returning Reply %v for Put/Append RPC %v", *reply, newOp))
-	}	
+		kv.mu.Lock()
+		delete(kv.pendingRpcs, expextedIndex)
+		kv.mu.Unlock()
+
+		reply.Status = Error	
+	}
+
+	kv.logDebug(fmt.Sprintf("Returning Reply %v for Put/Append RPC %v", *reply, newOp))	
 }
 
 //
@@ -149,41 +174,57 @@ func (kv *RaftKV) run(){
 		//Type inference to case back from interface{}
 		appliedOp, ok := appliedMsg.Command.(Op)
 		if !ok { continue }
-
-		kv.logDebug(fmt.Sprintf("Applied Op %v to Raft", appliedOp))
 		
 		kv.mu.Lock()
 
-		//Update this kv's database accordingly
-		switch appliedOp.Type {
-		case Put:
-			kv.database[appliedOp.Key] = appliedOp.Value
-			kv.logDebug(fmt.Sprintf("New database %v", kv.database))
-		case Append:
-			_, ok := kv.database[appliedOp.Key]
-			if ok {
-				kv.database[appliedOp.Key] += appliedOp.Value
-			} else {
+		lastAppliedId, ok := kv.lastApplied[appliedOp.ClientId]
+
+		kv.logDebug(fmt.Sprintf("Applied Op %v to Raft", appliedOp))
+
+		//If this appliedOp after the lastApplied Op (from this client) on this server  
+		if !ok || lastAppliedId < appliedOp.RequestId {
+			//Update this kv's database accordingly
+			switch appliedOp.Type {
+			case Put:
 				kv.database[appliedOp.Key] = appliedOp.Value
+
+				kv.logDebug(fmt.Sprintf("New database %v", kv.database))
+			case Append:
+				_, ok := kv.database[appliedOp.Key]
+				if ok {
+					kv.database[appliedOp.Key] += appliedOp.Value
+				} else {
+					kv.database[appliedOp.Key] = appliedOp.Value
+				}
+
+				kv.logDebug(fmt.Sprintf("New database %v", kv.database))
 			}
 
-			kv.logDebug(fmt.Sprintf("New database %v", kv.database))
-		}
+			//Update the lastApplied for this client on this server
+			kv.lastApplied[appliedOp.ClientId] = appliedOp.RequestId
+		}	
 
+		//Notify any pending RPCs
+		pendingRpc, ok := kv.pendingRpcs[appliedIndex]
 
-		//Notify any pending ops theyre all done
-		pendingOp, ok := kv.pendingOps[appliedIndex]
-
+		//If the RPC for this appliedOp is not pending on this server then just move on
 		if !ok { 
 			kv.mu.Unlock()
 			continue 
 		}
 
-		delete(kv.pendingOps, appliedIndex)
+		//Delete the pending RPC at this index
+		delete(kv.pendingRpcs, appliedIndex)
 		kv.mu.Unlock()
 
-		//Notify the Op that it has been applied to Raft
-		pendingOp.appliedCh <- true
+		//Make sure the Op that was applied at this index was the Op requested by the pendingRpc
+		if pendingRpc.op.ClientId == appliedOp.ClientId && pendingRpc.op.RequestId == appliedOp.RequestId {
+			//If so, notify the pending RPC that it has succeeded
+			pendingRpc.appliedCh <- true
+		} else {
+			//If not, notify the pending RPC that it has failed
+			pendingRpc.appliedCh <- false
+		}
 	}
 }
 
@@ -209,8 +250,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.database = make(map[string]string)
-	kv.pendingOps = make(map[int]*PendingOp)
-	kv.lastApplied = make(map[int]int)
+	kv.pendingRpcs = make(map[int]*PendingRpc)
+	kv.lastApplied = make(map[int64]int)
 	kv.DEBUG = true
 
 	// Your initialization code here.

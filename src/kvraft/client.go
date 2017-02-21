@@ -11,10 +11,11 @@ import (
 
 
 type Clerk struct {
-	servers    []*labrpc.ClientEnd
-	me         int64 //this clerks id
-	lastLeader int
-	DEBUG      bool
+	servers     []*labrpc.ClientEnd
+	me          int64 //this clerks id
+	lastLeader  int
+	lastRequest int
+	DEBUG       bool
 	// You will have to modify this struct.
 }
 
@@ -38,6 +39,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	ck.me = nrand()
 	ck.lastLeader = 0
+	ck.lastRequest = 0
+
 	ck.DEBUG = true
 
 	ck.logDebug(fmt.Sprintf("Started Up"))
@@ -58,38 +61,33 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.lastRequest += 1
 	args := GetArgs{}
+	args.ClientId = ck.me
+	args.RequestId = ck.lastRequest
 	args.Key = key
-
+	
 	//Want to iterate through servers starting at the lastLeader
 	servNum := ck.lastLeader
 	//Keep trying request until it succeeds
 	for {
 		reply := GetReply{}
 
-		//ck.logDebug(fmt.Sprintf("Sending Get RPC:%v to server %d", args, servNum))
+		ck.logDebug(fmt.Sprintf("Sending RPC %v to Server:%d", args, servNum))
 
 		ok := ck.servers[servNum].Call("RaftKV.Get", args, &reply)
 
-		if ok {
-			wrongLeader := reply.WrongLeader
-			errCode := reply.Err
-			value := reply.Value
-			if wrongLeader {
-				//ck.logDebug(fmt.Sprintf("Server %d is no longer a leader", servNum))
-			} else if errCode != OK {
-				ck.lastLeader = servNum
-				ck.logDebug(fmt.Sprintf("Got ErrorCode %s", errCode))
-				return ""
-			} else {
-				ck.lastLeader = servNum
-				ck.logDebug(fmt.Sprintf("Got Value %s", value))
-				return value
-			}
-			
-		} else {
-			ck.logDebug(fmt.Sprintf("RPC call to server %d failed", servNum))
-		}
+		//If the RPC call succeeded then return the value 
+		if ok && reply.Status == OK {
+			ck.logDebug(fmt.Sprintf("RPC %v succeeded, got value:%s", args, reply.Value))
+
+			//Set the last leader for use in the future
+			ck.lastLeader = servNum
+			return reply.Value
+		} 
+
+		//Otherwise try the next server
+		ck.logDebug(fmt.Sprintf("RPC %v call to Server:%d failed", args, servNum))
 
 		servNum = (servNum + 1) % len(ck.servers)
 	}
@@ -106,7 +104,10 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, opType OpType) {
+	ck.lastRequest += 1
 	args := PutAppendArgs{}
+	args.ClientId = ck.me
+	args.RequestId = ck.lastRequest
 	args.Type = opType
 	args.Key = key
 	args.Value = value
@@ -117,29 +118,20 @@ func (ck *Clerk) PutAppend(key string, value string, opType OpType) {
 	for {
 		reply := PutAppendReply{}
 
-		//ck.logDebug(fmt.Sprintf("Sending %s RPC:%v to server %d", opType, args, servNum))
+		ck.logDebug(fmt.Sprintf("Sending RPC %v to Server:%d", args, servNum))
+
 		ok := ck.servers[servNum].Call("RaftKV.PutAppend", args, &reply)
 
-		if ok {
-			wrongLeader := reply.WrongLeader
-			errCode := reply.Err
-			if wrongLeader {
-				//ck.logDebug(fmt.Sprintf("Server %d is no longer a leader", servNum))
+		if ok && reply.Status == OK {
+			ck.logDebug(fmt.Sprintf("RPC %v succeeded", args))
 
-			} else if errCode != OK {
-				ck.logDebug(fmt.Sprintf("Got ErrorCode %s", errCode))
-
-				ck.lastLeader = servNum
-				return
-			} else {
-				ck.logDebug(fmt.Sprintf("RPC %v succeeded", args))
-
-				ck.lastLeader = servNum
-				return
-			}
-		} else {
-			ck.logDebug(fmt.Sprintf("RPC call to server %d failed", servNum))
+			//Set the last leader for use in the future
+			ck.lastLeader = servNum
+			return
 		}
+
+		//Otherwise try the next server
+		ck.logDebug(fmt.Sprintf("RPC %v call to Server:%d failed", args, servNum))
 
 		servNum = (servNum + 1) % len(ck.servers)
 	}
