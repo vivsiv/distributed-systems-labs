@@ -927,7 +927,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.NextIndex = make([]int, len(peers)) 
 	rf.matchIndex = make([]int, len(peers))
 
-	rf.DEBUG = true
+	rf.DEBUG = false
 	rf.LOCK_DEBUG = false
 
 	// initialize from state persisted before a crash

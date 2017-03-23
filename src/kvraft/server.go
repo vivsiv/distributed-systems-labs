@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	//"log"
@@ -29,13 +30,15 @@ type RaftKV struct {
 	mu           sync.Mutex
 	me           int
 	rf           *raft.Raft
+	persister    *raft.Persister
 	applyCh      chan raft.ApplyMsg
-	maxraftstate int // snapshot if log grows this big
-	database     map[string]string
+	maxraftstate int //Max allowed size of raft log, snapshot if it grows larger than this
+	Database     map[string]string
 	pendingRpcs  map[int]*PendingRpc //Maps expectedIndex in this server's log to PendingRpc structs
-	lastApplied  map[int64]int //Maps ClientId to last applied RequestId per client
+	LastApplied  map[int64]int //Maps ClientId to last applied RequestId per client
 	DEBUG        bool
 	LOCK_DEBUG   bool
+	SNAPSHOT     bool
 }
 
 func (kv *RaftKV) toString() string {
@@ -46,6 +49,25 @@ func (kv *RaftKV) logDebug(msg string) {
 	if kv.DEBUG { fmt.Printf("%s:%s\n", kv.toString(), msg) }
 }
 
+func (kv *RaftKV) loadSnapshot(snapshot []byte) {
+	buf := bytes.NewBuffer(snapshot)
+	dec := gob.NewDecoder(buf)
+	dec.Decode(&kv.Database)
+	dec.Decode(&kv.LastApplied)
+
+}
+
+func (kv *RaftKV) createSnapshot(lastAppliedIndex int){
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+	enc.Encode(kv.Database)
+	enc.Encode(kv.LastApplied)
+	snapshot := buf.Bytes()
+	kv.persister.SaveSnapshot(snapshot)
+
+	go kv.rf.TrimLog(lastAppliedIndex)
+}
+
 func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 	newOp := Op{}
 	newOp.ClientId = args.ClientId
@@ -53,15 +75,16 @@ func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 	newOp.Type = Get
 	newOp.Key = args.Key
 
-	//Need to Persist Command to Raft
-	expextedIndex, _, isLeader := kv.rf.Start(newOp)
+	//Try Persisting Command to Raft
+	expectedIndex, _, isLeader := kv.rf.Start(newOp)
 
-	//If this raft is not the leader just return
+	//If this server isnt the leader then return
 	if !isLeader {
 		reply.Status = Error
 		return 
 	}
 
+	//If it is the leader then service the request
 	kv.logDebug(fmt.Sprintf("Got Get RPC:%v, persisting to Raft...", newOp))
 
 	pendingRpc := &PendingRpc{}
@@ -69,7 +92,7 @@ func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 	pendingRpc.appliedCh = make(chan bool)
 
 	kv.mu.Lock()
-	kv.pendingRpcs[expextedIndex] = pendingRpc
+	kv.pendingRpcs[expectedIndex] = pendingRpc
 	kv.mu.Unlock()
 
 	rpcTimeout := time.After(time.Duration(RPC_TIMEOUT) * time.Millisecond)
@@ -81,7 +104,7 @@ func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 			kv.logDebug(fmt.Sprintf("Notified %v Op was persisted to Raft, updating database...", newOp))
 			//Then we can query the database
 			kv.mu.Lock()
-			value := kv.database[newOp.Key]
+			value := kv.Database[newOp.Key]
 			kv.mu.Unlock()
 
 			reply.Status = OK
@@ -94,7 +117,7 @@ func (kv *RaftKV) Get(args GetArgs, reply *GetReply) {
 		kv.logDebug(fmt.Sprintf("RPC for Op %v timed out", newOp))
 
 		kv.mu.Lock()
-		delete(kv.pendingRpcs, expextedIndex)
+		delete(kv.pendingRpcs, expectedIndex)
 		kv.mu.Unlock()
 
 		reply.Status = Error	
@@ -111,7 +134,7 @@ func (kv *RaftKV) PutAppend(args PutAppendArgs, reply *PutAppendReply) {
 	newOp.Value = args.Value
 
 	//Need to Persist Command to Raft
-	expextedIndex, _, isLeader := kv.rf.Start(newOp)
+	expectedIndex, _, isLeader := kv.rf.Start(newOp)
 
 	if !isLeader {
 		reply.Status = Error
@@ -123,7 +146,7 @@ func (kv *RaftKV) PutAppend(args PutAppendArgs, reply *PutAppendReply) {
 	pendingRpc.appliedCh = make(chan bool)
 
 	kv.mu.Lock()
-	kv.pendingRpcs[expextedIndex] = pendingRpc
+	kv.pendingRpcs[expectedIndex] = pendingRpc
 	kv.mu.Unlock()
 
 	kv.logDebug(fmt.Sprintf("Got Put/Append RPC:%v, persisting to Raft...", newOp))
@@ -143,7 +166,7 @@ func (kv *RaftKV) PutAppend(args PutAppendArgs, reply *PutAppendReply) {
 		kv.logDebug(fmt.Sprintf("RPC for Op %v timed out", newOp))
 
 		kv.mu.Lock()
-		delete(kv.pendingRpcs, expextedIndex)
+		delete(kv.pendingRpcs, expectedIndex)
 		kv.mu.Unlock()
 
 		reply.Status = Error	
@@ -170,39 +193,57 @@ func (kv *RaftKV) run(){
 		//Read apply messages off the apply channel and process them
 		appliedMsg := <-kv.applyCh
 
+		// //Check if this applyMsg has a snapshot, if so load it
+		// if appliedMsg.UseSnapshot {
+		// 	kv.logDebug(fmt.Sprintf("Loading Snapshot..."))
+
+		// 	kv.loadSnapshot(appliedMsg.Snapshot)
+		// 	continue
+		// }
+
 		appliedIndex := appliedMsg.Index
-		//Type inference to case back from interface{}
+		//Type inference to cast back from interface{}
 		appliedOp, ok := appliedMsg.Command.(Op)
 		if !ok { continue }
 		
 		kv.mu.Lock()
 
-		lastAppliedId, ok := kv.lastApplied[appliedOp.ClientId]
+		lastAppliedId, ok := kv.LastApplied[appliedOp.ClientId]
 
 		kv.logDebug(fmt.Sprintf("Applied Op %v to Raft", appliedOp))
 
-		//If this appliedOp after the lastApplied Op (from this client) on this server  
-		if !ok || lastAppliedId < appliedOp.RequestId {
+		//If this client doesn't have a lastAppliedOp on this server or
+		//This appliedOp is after the lastAppliedOp, from this client on this server  
+		if !ok || (appliedOp.RequestId > lastAppliedId) {
 			//Update this kv's database accordingly
 			switch appliedOp.Type {
 			case Put:
-				kv.database[appliedOp.Key] = appliedOp.Value
+				kv.Database[appliedOp.Key] = appliedOp.Value
 
-				kv.logDebug(fmt.Sprintf("New database %v", kv.database))
+				kv.logDebug(fmt.Sprintf("New Database %v", kv.Database))
 			case Append:
-				_, ok := kv.database[appliedOp.Key]
+				_, ok := kv.Database[appliedOp.Key]
+				//If the entry is in the database then Append concatenates the new Ops value to the existing Op
+				//Otherwise it just adds the Op to the database
 				if ok {
-					kv.database[appliedOp.Key] += appliedOp.Value
+					kv.Database[appliedOp.Key] += appliedOp.Value
 				} else {
-					kv.database[appliedOp.Key] = appliedOp.Value
+					kv.Database[appliedOp.Key] = appliedOp.Value
 				}
 
-				kv.logDebug(fmt.Sprintf("New database %v", kv.database))
+				kv.logDebug(fmt.Sprintf("New Database %v", kv.Database))
 			}
 
 			//Update the lastApplied for this client on this server
-			kv.lastApplied[appliedOp.ClientId] = appliedOp.RequestId
-		}	
+			kv.LastApplied[appliedOp.ClientId] = appliedOp.RequestId
+		}
+
+		// //Initiate snapshot if raft log has grown too large
+		// if kv.SNAPSHOT && kv.persister.RaftStateSize() > kv.maxraftstate {
+		// 	kv.logDebug(fmt.Sprintf("RaftStateSize:%d > maxraftstate:%d... Creating Snapshot until index:%d", 
+		// 		kv.persister.RaftStateSize(), kv.maxraftstate, appliedIndex))
+		// 	kv.createSnapshot(appliedIndex)
+		// }
 
 		//Notify any pending RPCs
 		pendingRpc, ok := kv.pendingRpcs[appliedIndex]
@@ -248,14 +289,21 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(RaftKV)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
-	kv.database = make(map[string]string)
+	kv.persister = persister
+	kv.Database = make(map[string]string)
 	kv.pendingRpcs = make(map[int]*PendingRpc)
-	kv.lastApplied = make(map[int64]int)
+	kv.LastApplied = make(map[int64]int)
 	kv.DEBUG = true
 
-	// Your initialization code here.
+	// if maxraftstate > 0 {
+	// 	kv.maxraftstate = maxraftstate
+	// 	kv.SNAPSHOT = true
+	// } else {
+	// 	kv.maxraftstate = 0
+	// 	kv.SNAPSHOT = false
+	// }
 
+	// Your initialization code here.
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
