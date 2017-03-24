@@ -126,7 +126,7 @@ func (rf *Raft) getLogTerm(logIndex int) int {
 	if logIndex >= rf.LogStartIndex {
 		return rf.Logs[rf.getLogEntryNum(logIndex)].Term 
 	} else {
-		return 0
+		return rf.LastSnapshotTerm
 	}
 }
 
@@ -140,7 +140,7 @@ func (rf *Raft) getLastLogTerm() int {
 	if len(rf.Logs) > 0 {
 		return rf.Logs[len(rf.Logs) - 1].Term
 	} else {
-		return 0
+		return rf.LastSnapshotTerm
 	}
 }
 
@@ -163,8 +163,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Logs)
-	// e.Encode(rf.LogStartIndex)
-	// e.Encode(rf.LastSnapshotTerm)
+	e.Encode(rf.LogStartIndex)
+	e.Encode(rf.LastSnapshotTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -178,8 +178,8 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.CurrentTerm)
 	d.Decode(&rf.VotedFor)
 	d.Decode(&rf.Logs)
-	// d.Decode(&rf.LogStartIndex)
-	// d.Decode(&rf.LastSnapshotTerm)
+	d.Decode(&rf.LogStartIndex)
+	d.Decode(&rf.LastSnapshotTerm)
 }
 
 
@@ -232,8 +232,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		//  A requester's log is behind this peer's log if:
 		//   1) The lastLogTerm of this Peer is greater than the lastLogTerm of the Requester
 		//   2) The lastLogTerms are equal and the lastLogIndex of this Peer is greater than the lastLogIndex of the Requester
-		if rf.VotedFor > -1 || lastLogTerm > args.LastLogTerm || (args.LastLogTerm == lastLogTerm && lastLogIndex > args.LastLogIndex) {
-			rf.logDebug(fmt.Sprintf("DENIED RequestVote for Requester:<Peer:%d Term:%d> (This Peer Already Voted OR Requester's Logs Are Behind)", 
+		if rf.state == LEADER || rf.VotedFor > -1 || lastLogTerm > args.LastLogTerm || (args.LastLogTerm == lastLogTerm && lastLogIndex > args.LastLogIndex) {
+			rf.logDebug(fmt.Sprintf("DENIED RequestVote for Requester:<Peer:%d Term:%d> (This Peer is already the Leader OR this Peer Already Voted OR the Requester's Logs Are Behind)", 
 				args.CandidateId, args.Term))
 
 			reply.Term = rf.CurrentTerm
@@ -441,65 +441,61 @@ func (rf *Raft) broadcastAppendEntries(){
 			// Get the index of the next log entry to send to this Peer
 			nextLogIdx := rf.NextIndex[peerNum]
 
-			// //If this Leader has deleted the log that the Peer needs, then send it a snapshot
-			// if nextLogIdx < rf.LogStartIndex {
-			// 	args := &InstallSnapshotArgs{}
-			// 	args.Term = rf.CurrentTerm
-			// 	args.LeaderId = rf.me
-			// 	args.LastIncludedIndex = rf.LogStartIndex - 1 
-			// 	args.LastIncludedTerm = rf.LastSnapshotTerm
-			// 	args.Data = rf.persister.ReadSnapshot()
+			//If this Leader has deleted the log that the Peer needs, then send it a snapshot
+			if nextLogIdx < rf.LogStartIndex {
+				args := &InstallSnapshotArgs{}
+				args.Term = rf.CurrentTerm
+				args.LeaderId = rf.me
+				args.LastIncludedIndex = rf.LogStartIndex - 1 
+				args.LastIncludedTerm = rf.LastSnapshotTerm
+				args.Data = rf.persister.ReadSnapshot()
 
-			// 	reply := &InstallSnapshotReply{}
+				reply := &InstallSnapshotReply{}
 
-			// 	go rf.sendInstallSnapshot(peerNum, *args, reply)
-			// } else {
-			// // Otherwise just send a regular AppendEntry
-			// 	args := &AppendEntriesArgs{}
-			// 	args.Term = rf.CurrentTerm
-			// 	args.LeaderId = rf.me
+				go rf.sendInstallSnapshot(peerNum, *args, reply)
+			} else {
+			// Otherwise just send a regular AppendEntry
+				args := &AppendEntriesArgs{}
+				args.Term = rf.CurrentTerm
+				args.LeaderId = rf.me
 
-			// 	// Set the info of the previous log entry (immediately preceeding nextLogIdx)
-			// 	args.PrevLogIndex = nextLogIdx - 1
-			// 	if args.PrevLogIndex >= rf.LogStartIndex {
-			// 		args.PrevLogTerm = rf.Logs[rf.getLogEntryNum(args.PrevLogIndex)].Term 
-			// 	} else {
-			// 		args.PrevLogTerm = 0
-			// 	}
+				// Set the info of the previous log entry (immediately preceeding nextLogIdx)
+				args.PrevLogIndex = nextLogIdx - 1
+				args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
 
-			// 	args.Entries = rf.Logs[rf.getLogEntryNum(nextLogIdx):]
-			// 	args.LeaderCommit = rf.CommitIndex
+				args.Entries = rf.Logs[rf.getLogEntryNum(nextLogIdx):]
+				args.LeaderCommit = rf.CommitIndex
 
-			// 	reply := &AppendEntriesReply{}
+				reply := &AppendEntriesReply{}
 
-			// 	if len(args.Entries) > 0 {
-			// 		msgs = append(msgs, 
-			// 			fmt.Sprintf("<Peer:%d, Entries[%d-]:%v>", 
-			// 				peerNum, args.PrevLogIndex + 1, args.Entries))
-			// 	}
+				if len(args.Entries) > 0 {
+					msgs = append(msgs, 
+						fmt.Sprintf("<Peer:%d, Entries[%d-]:%v>", 
+							peerNum, args.PrevLogIndex + 1, args.Entries))
+				}
 
-			// 	go rf.sendAppendEntries(peerNum, *args, reply)
-			// }
-
-			args := &AppendEntriesArgs{}
-			args.Term = rf.CurrentTerm
-			args.LeaderId = rf.me
-
-			// Set the info of the previous log entry (immediately preceeding nextLogIdx)
-			args.PrevLogIndex = nextLogIdx - 1
-			args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
-			args.Entries = rf.Logs[rf.getLogEntryNum(nextLogIdx):]
-			args.LeaderCommit = rf.CommitIndex
-
-			reply := &AppendEntriesReply{}
-
-			if len(args.Entries) > 0 {
-				msgs = append(msgs, 
-					fmt.Sprintf("<Peer:%d, Entries[%d-%d]:%v>", 
-						peerNum, args.PrevLogIndex + 1, args.PrevLogIndex + len(args.Entries), args.Entries))
+				go rf.sendAppendEntries(peerNum, *args, reply)
 			}
 
-			go rf.sendAppendEntries(peerNum, *args, reply)
+			// args := &AppendEntriesArgs{}
+			// args.Term = rf.CurrentTerm
+			// args.LeaderId = rf.me
+
+			// // Set the info of the previous log entry (immediately preceeding nextLogIdx)
+			// args.PrevLogIndex = nextLogIdx - 1
+			// args.PrevLogTerm = rf.getLogTerm(args.PrevLogIndex)
+			// args.Entries = rf.Logs[rf.getLogEntryNum(nextLogIdx):]
+			// args.LeaderCommit = rf.CommitIndex
+
+			// reply := &AppendEntriesReply{}
+
+			// if len(args.Entries) > 0 {
+			// 	msgs = append(msgs, 
+			// 		fmt.Sprintf("<Peer:%d, Entries[%d-%d]:%v>", 
+			// 			peerNum, args.PrevLogIndex + 1, args.PrevLogIndex + len(args.Entries), args.Entries))
+			// }
+
+			// go rf.sendAppendEntries(peerNum, *args, reply)
 
 			rf.releaseMutex("broadcastAppendEntries()")
 		}		
@@ -609,13 +605,14 @@ func (rf *Raft) applyState(applyCh chan ApplyMsg){
 
 		rf.getMutex("applyState()")
 
-		// if rf.lastAppliedIndex < (rf.LogStartIndex - 1) {
-		// 	applyMsg := ApplyMsg{}
-		// 	applyMsg.UseSnapshot = true
-		// 	applyMsg.Snapshot = rf.persister.ReadSnapshot()
-		// 	applyCh <- applyMsg
-		// 	rf.lastAppliedIndex = rf.LogStartIndex - 1
-		// }
+		//If the last applied index is more than 1 less than the last log index, the log was trimmed for a snapshot.
+		if rf.lastAppliedIndex < (rf.LogStartIndex - 1) {
+			applyMsg := ApplyMsg{}
+			applyMsg.UseSnapshot = true
+			applyMsg.Snapshot = rf.persister.ReadSnapshot()
+			applyCh <- applyMsg
+			rf.lastAppliedIndex = rf.LogStartIndex - 1
+		}
 
 		if rf.lastAppliedIndex < rf.CommitIndex {
 			for logIndex := rf.lastAppliedIndex + 1; logIndex <= rf.CommitIndex; logIndex++ {
@@ -654,14 +651,39 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		return
 	}
 
-	rf.CurrentTerm = args.Term
+	if args.LastIncludedIndex < (rf.LogStartIndex - 1) {
+		return
+	}
+
+	rf.CurrentTerm = args.Term	
+
+	//If this peer has more log entries than the snapshot, keep the extra entries
+	if (rf.LogStartIndex <= args.LastIncludedIndex) && (rf.getLastLogIndex() > args.LastIncludedIndex) {
+		rf.logDebug(fmt.Sprintf("Checking overlapping entry for lastIncludedIndex:%d, logStartIndex:%d, lastLogIndex:%d", 
+				args.LastIncludedIndex, rf.LogStartIndex, rf.getLastLogIndex()))
+
+		overlappingEntry := rf.Logs[rf.getLogEntryNum(args.LastIncludedIndex)]
+		//If this peer has an entry with the same index and term as the last included entry as the snapshot
+		if overlappingEntry.Term == args.LastIncludedTerm {
+			rf.Logs = rf.Logs[rf.getLogEntryNum(args.LastIncludedIndex + 1):]
+		} else {
+			rf.Logs = make([]LogEntry, 0)
+		}
+	} else {
+		rf.Logs = make([]LogEntry, 0)
+	}
+
+	//Save the snapshot data
+	rf.persister.SaveSnapshot(args.Data)
+
+	//Adjust the log indices accordingly
 	rf.LogStartIndex = args.LastIncludedIndex + 1
 	rf.LastSnapshotTerm = args.LastIncludedTerm
-	//Delete any logs in this snapshot from this server's logs
-	rf.Logs = rf.Logs[rf.getLogEntryNum(rf.LogStartIndex):]
 
 	//Valid InstallSnapshots count as heartbeats
-	rf.heartbeatCh <-true	
+	// rf.heartbeatCh <-true	
+
+	go rf.persist()
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -682,7 +704,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs, reply 
 			rf.heartbeatCh <-true
 		} else {
 			rf.matchIndex[server] = args.LastIncludedIndex
-			rf.NextIndex[server] = rf.matchIndex[server] + 1
+			rf.NextIndex[server] = args.LastIncludedIndex + 1
 		}
 	}
 	return ok
@@ -699,12 +721,17 @@ func (rf *Raft) TrimLog(lastAppliedIndex int){
 		return
 	}
 
-	rf.logDebug(fmt.Sprintf("Trimming Entries[%d-%d]:%v from Log", 
-		rf.LogStartIndex, newLogStartIndex - 1, rf.Logs[rf.getLogEntryNum(rf.LogStartIndex):rf.getLogEntryNum(newLogStartIndex)]))
+	rf.logDebug(fmt.Sprintf("Raft State Size is %d, Trimming Entries[%d-%d]:%v from Log", 
+		rf.persister.RaftStateSize(), rf.LogStartIndex, newLogStartIndex - 1, rf.Logs[rf.getLogEntryNum(rf.LogStartIndex):rf.getLogEntryNum(newLogStartIndex)]))
 
 	//Trim all logs before LogStartIndex 
 	lastSnapshotEntry := rf.Logs[rf.getLogEntryNum(newLogStartIndex - 1)]
 	rf.Logs = rf.Logs[rf.getLogEntryNum(newLogStartIndex):]
+
+	rf.logDebug(fmt.Sprintf("Logs Trimmed, now:[%d-%d]:%v", 
+		newLogStartIndex, newLogStartIndex + len(rf.Logs), rf.Logs))
+
+
 	rf.LogStartIndex = newLogStartIndex
 	rf.LastSnapshotTerm = lastSnapshotEntry.Term
 
@@ -927,7 +954,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.NextIndex = make([]int, len(peers)) 
 	rf.matchIndex = make([]int, len(peers))
 
-	rf.DEBUG = false
+	rf.DEBUG = true
 	rf.LOCK_DEBUG = false
 
 	// initialize from state persisted before a crash

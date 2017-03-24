@@ -193,13 +193,13 @@ func (kv *RaftKV) run(){
 		//Read apply messages off the apply channel and process them
 		appliedMsg := <-kv.applyCh
 
-		// //Check if this applyMsg has a snapshot, if so load it
-		// if appliedMsg.UseSnapshot {
-		// 	kv.logDebug(fmt.Sprintf("Loading Snapshot..."))
+		//Check if this applyMsg has a snapshot, if so load it
+		if appliedMsg.UseSnapshot {
+			kv.logDebug(fmt.Sprintf("Loading Snapshot..."))
 
-		// 	kv.loadSnapshot(appliedMsg.Snapshot)
-		// 	continue
-		// }
+			kv.loadSnapshot(appliedMsg.Snapshot)
+			continue
+		}
 
 		appliedIndex := appliedMsg.Index
 		//Type inference to cast back from interface{}
@@ -238,12 +238,12 @@ func (kv *RaftKV) run(){
 			kv.LastApplied[appliedOp.ClientId] = appliedOp.RequestId
 		}
 
-		// //Initiate snapshot if raft log has grown too large
-		// if kv.SNAPSHOT && kv.persister.RaftStateSize() > kv.maxraftstate {
-		// 	kv.logDebug(fmt.Sprintf("RaftStateSize:%d > maxraftstate:%d... Creating Snapshot until index:%d", 
-		// 		kv.persister.RaftStateSize(), kv.maxraftstate, appliedIndex))
-		// 	kv.createSnapshot(appliedIndex)
-		// }
+		//Initiate snapshot if raft log has grown too large
+		if kv.SNAPSHOT && kv.persister.RaftStateSize() > kv.maxraftstate {
+			kv.logDebug(fmt.Sprintf("RaftStateSize:%d > maxraftstate:%d... Creating Snapshot until index:%d", 
+				kv.persister.RaftStateSize(), kv.maxraftstate, appliedIndex))
+			kv.createSnapshot(appliedIndex)
+		}
 
 		//Notify any pending RPCs
 		pendingRpc, ok := kv.pendingRpcs[appliedIndex]
@@ -295,13 +295,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.LastApplied = make(map[int64]int)
 	kv.DEBUG = true
 
-	// if maxraftstate > 0 {
-	// 	kv.maxraftstate = maxraftstate
-	// 	kv.SNAPSHOT = true
-	// } else {
-	// 	kv.maxraftstate = 0
-	// 	kv.SNAPSHOT = false
-	// }
+	if maxraftstate > 0 {
+		kv.maxraftstate = maxraftstate
+		kv.SNAPSHOT = true
+	} else {
+		kv.maxraftstate = 0
+		kv.SNAPSHOT = false
+	}
 
 	// Your initialization code here.
 	kv.applyCh = make(chan raft.ApplyMsg)
